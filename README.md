@@ -1,0 +1,1 @@
+This project implements a primal-dual interior point method solver for convex quadratic programs in python.
