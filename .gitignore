@@ -11,3 +11,4 @@ wheels/
 
 # Files for development use
 # test.ipynb
+.DS_Store
