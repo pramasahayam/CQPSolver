@@ -139,6 +139,31 @@ wheels = [
 ]
 
 [[package]]
+name = "cqpsolver"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "numpy", specifier = ">=2.4.1" },
+    { name = "scipy", specifier = ">=1.17.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ipykernel", specifier = ">=7.1.0" }]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -507,31 +532,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/d4/de/53e0bcf53d13e005b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/32/f8e3c85d1d5250232a5d3477a2a28cc291968ff175caeadaf3cc19ce0e4a/parso-0.8.5-py2.py3-none-any.whl", hash = "sha256:646204b5ee239c396d040b90f9e272e9a8017c630092bf59980beb62fd033887", size = 106668, upload-time = "2025-08-23T15:15:25.663Z" },
 ]
-
-[[package]]
-name = "pd-ipm-solver"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "scipy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ipykernel" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "matplotlib", specifier = ">=3.10.8" },
-    { name = "numpy", specifier = ">=2.4.1" },
-    { name = "scipy", specifier = ">=1.17.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ipykernel", specifier = ">=7.1.0" }]
 
 [[package]]
 name = "pexpect"

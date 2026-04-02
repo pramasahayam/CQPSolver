@@ -31,7 +31,7 @@ class Problem:
 
 @dataclass(frozen=True)
 class Residuals:
-    """Stores the residuals and whether convergence is reached."""
+    """Stores the residuals and evaluates whether convergence is reached."""
 
     primal_ineq: float
     primal_eq: float
@@ -39,7 +39,7 @@ class Residuals:
     duality: float
 
     def converged(self, tol: float) -> bool:
-        """Check residuals, duality gap, and complentarity to evaluate convergence."""
+        """Check residuals, duality gap, and stationarity to evaluate convergence."""
         return max(self.primal_ineq, self.primal_eq, self.stationarity, self.duality) < tol
 
 @dataclass(frozen=True)
@@ -80,7 +80,7 @@ class Solver:
 
         sol: np.ndarray = np.linalg.solve(LHS, RHS)
         x: np.ndarray = sol[: self.prob.n]
-        y: np.ndarray = sol[-self.prob.m :]
+        y: np.ndarray = sol[-self.prob.m :] if self.prob.m > 0 else np.zeros((0, 1))
 
         # Set initial primal/dual variables
         x0: np.ndarray = x
@@ -170,7 +170,7 @@ class Solver:
         delta_x: np.ndarray = delta[: self.prob.n]
         delta_s: np.ndarray = delta[self.prob.n : self.prob.n + self.prob.p]
         delta_z: np.ndarray = delta[self.prob.n + self.prob.p : self.prob.n + 2 * self.prob.p]
-        delta_y: np.ndarray = delta[-self.prob.m :]
+        delta_y: np.ndarray = delta[-self.prob.m :] if self.prob.m > 0 else np.zeros((0, 1))
 
         # Compute step size to maintain nonnegativity of s and z
         step_size: float = min(1, 0.99 * min(self.max_step(state.s, delta_s), self.max_step(state.z, delta_z)))
