@@ -47,6 +47,7 @@ class SolverState:
     """Stores the state of the solver and relevant data at each iteration."""
 
     iter: int
+    obj: float
     x: np.ndarray
     s: np.ndarray
     z: np.ndarray
@@ -93,9 +94,13 @@ class Solver:
         alpha_d: float = -np.min(z)
         z0: np.ndarray = z if alpha_d < 0 else z + 1 + alpha_d
 
+        initial_obj: float = 0.5 * (x0.T @ self.prob.Q @ x0) + self.prob.q.T @ x0
+
         initial_res: Residuals = self.calc_residuals(x0, s0, z0, y0)
 
-        initial_state: SolverState = SolverState(iter=0, x=x0, s=s0, z=z0, y=y0, residuals=initial_res, step_size=None)
+        initial_state: SolverState = SolverState(
+            iter=0, obj=initial_obj, x=x0, s=s0, z=z0, y=y0, residuals=initial_res, step_size=None
+        )
 
         return initial_state
 
@@ -181,12 +186,15 @@ class Solver:
         z_new: np.ndarray = state.z + step_size * delta_z
         y_new: np.ndarray = state.y + step_size * delta_y
 
+        # Find updated value of objective function
+        obj: float = 0.5 * (x_new.T @ self.prob.Q @ x_new) + self.prob.q.T @ x_new
+
         # Find new Residuals
         new_res: Residuals = self.calc_residuals(x_new, s_new, z_new, y_new)
 
         # Create new SolverState
         new_state: SolverState = SolverState(
-            iter=state.iter + 1, x=x_new, s=s_new, z=z_new, y=y_new, residuals=new_res, step_size=step_size,
+            iter=state.iter + 1, obj=obj, x=x_new, s=s_new, z=z_new, y=y_new, residuals=new_res, step_size=step_size,
         )
 
         return new_state
