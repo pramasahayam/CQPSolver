@@ -1,7 +1,11 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.sparse as sp
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 header: str = (
     f"{'Iter.':^5} │ {'Objective':^14} │ {'Primal Inequality':^17} │ "
@@ -153,6 +157,7 @@ class Solver:
             ],
         )
         LHS: sp.csc_array = sp.vstack([LHS_row1, LHS_row2, LHS_row3, LHS_row4], format="csc")
+        solve: Callable[[np.ndarray], np.ndarray] = sp.linalg.factorized(LHS)
 
         RHS_aff_row1: np.ndarray = -(
             self.prob.Q @ state.x + self.prob.q + self.prob.G.T @ state.z + self.prob.A.T @ state.y
@@ -162,7 +167,7 @@ class Solver:
         RHS_aff_row4: np.ndarray = -(self.prob.A @ state.x - self.prob.b)
         RHS_aff: np.ndarray = np.vstack([RHS_aff_row1, RHS_aff_row2, RHS_aff_row3, RHS_aff_row4])
 
-        delta_aff: np.ndarray = (sp.linalg.spsolve(LHS, RHS_aff)).reshape(-1, 1)
+        delta_aff: np.ndarray = (solve(RHS_aff.flatten())).reshape(-1, 1)
         delta_s_aff: np.ndarray = delta_aff[self.prob.n : self.prob.n + self.prob.p]
         delta_z_aff: np.ndarray = delta_aff[self.prob.n + self.prob.p : self.prob.n + 2 * self.prob.p]
 
@@ -180,7 +185,7 @@ class Solver:
         RHS_cc_row4: np.ndarray = np.zeros([self.prob.m, 1])
         RHS_cc: np.ndarray = np.vstack([RHS_cc_row1, RHS_cc_row2, RHS_cc_row3, RHS_cc_row4])
 
-        delta_cc: np.ndarray = (sp.linalg.spsolve(LHS, RHS_cc)).reshape(-1, 1)
+        delta_cc: np.ndarray = (solve(RHS_cc.flatten())).reshape(-1, 1)
 
         # Combine aff and cc directions
         delta: np.ndarray = delta_aff + delta_cc
