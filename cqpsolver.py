@@ -3,6 +3,12 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse as sp
 
+header: str = (
+    f"{'Iter.':^5} │ {'Objective':^14} │ {'Primal Inequality':^17} │ "
+    f"{'Primal Equality':^15} │ {'Stationarity':^12} │ {'Duality':^11} │ {'Step Size':^6}"
+)
+
+divider: str = "─" * len(header)
 
 @dataclass(frozen=True)
 class Problem:
@@ -61,8 +67,9 @@ class Solver:
     """Primal-dual interior point method solver for convex QPs."""
 
     prob: Problem
-    tol: float = 1e-8
+    tol: float = 1e-6
     max_iter: int = 25
+    quiet: bool = False
 
     def find_initial_state(self) -> SolverState:
         """Calculate the initial point (x0, s0, y0, z0)."""
@@ -103,6 +110,10 @@ class Solver:
         initial_state: SolverState = SolverState(
             iter=0, obj=initial_obj, x=x0, s=s0, z=z0, y=y0, residuals=initial_res, step_size=None,
         )
+
+        if not self.quiet:
+            self._print_header()
+            self._print_row(initial_state)
 
         return initial_state
 
@@ -198,6 +209,9 @@ class Solver:
             iter=state.iter + 1, obj=obj, x=x_new, s=s_new, z=z_new, y=y_new, residuals=new_res, step_size=step_size,
         )
 
+        if not self.quiet:
+            self._print_row(new_state)
+
         return new_state
 
     def solve(self) -> list[SolverState]:
@@ -221,7 +235,20 @@ class Solver:
 
         return Residuals(primal_ineq, primal_eq, stationarity, duality)
 
-    def max_step(self, v, dv) -> float:
+    def max_step(self, v: np.ndarray, dv: np.ndarray) -> float:
         """Calculate max step in v direction given dv."""
-        ratios = -v[dv < 0] / dv[dv < 0]
+        ratios: np.ndarray = -v[dv < 0] / dv[dv < 0]
         return float(ratios.min()) if len(ratios) > 0 else float("inf")
+
+    def _print_header(self) -> None:
+        print(divider)
+        print(header)
+        print(divider)
+
+    def _print_row(self, state: SolverState) -> None:
+        res = state.residuals
+        step = f"{state.step_size:^9.4f}" if state.step_size is not None else f"{'—':^9}"
+        print(
+            f"{state.iter:^5} │ {state.obj:^14.8g} │ {res.primal_ineq:^17.4e} │ "
+            f"{res.primal_eq:^15.4e} │ {res.stationarity:^12.4e} │ {res.duality:^11.4e} │ {step}",
+        )
