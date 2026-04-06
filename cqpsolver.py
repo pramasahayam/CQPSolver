@@ -16,7 +16,7 @@ divider: str = "─" * len(header)
 
 @dataclass(frozen=True)
 class Problem:
-    """Convex quadratic program class to store problem parameters."""
+    """Class to store convex QP problem parameters."""
 
     Q: sp.csc_array  # (n,n)
     q: np.ndarray  # (n,1)
@@ -27,17 +27,17 @@ class Problem:
 
     @property
     def n(self) -> int:
-        """Dimension of q vector."""
+        """Size of q vector."""
         return self.q.size
 
     @property
     def p(self) -> int:
-        """Dimension of h vector."""
+        """Size of h vector."""
         return self.h.size
 
     @property
     def m(self) -> int:
-        """Dimension of b vector."""
+        """Size of b vector."""
         return self.b.size
 
 @dataclass(frozen=True)
@@ -122,7 +122,7 @@ class Solver:
         return initial_state
 
     def step(self, state: SolverState) -> SolverState:
-        """Compute next iteration."""
+        """Compute next state given current state."""
         # Setup and solve KKT system for affine scaling directions
         LHS_row1: sp.csc_array = sp.hstack(
             [
