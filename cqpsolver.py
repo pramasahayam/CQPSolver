@@ -42,16 +42,12 @@ class Problem:
 
 @dataclass(frozen=True)
 class Residuals:
-    """Stores the residuals and evaluates whether convergence is reached."""
+    """Stores the residuals for a state."""
 
     primal_ineq: float
     primal_eq: float
     stationarity: float
     duality: float
-
-    def converged(self, tol: float) -> bool:
-        """Check residuals, duality gap, and stationarity to evaluate convergence."""
-        return max(self.primal_ineq, self.primal_eq, self.stationarity, self.duality) < tol
 
 @dataclass(frozen=True)
 class SolverState:
@@ -65,6 +61,14 @@ class SolverState:
     y: np.ndarray
     residuals: Residuals
     step_size: float | None
+
+@dataclass(frozen=True)
+class Result:
+    """Stores final result of solver."""
+
+    convergence: bool
+    error_msg: str
+    final_state: SolverState
 
 @dataclass(frozen=True)
 class Solver:
@@ -107,7 +111,7 @@ class Solver:
         alpha_d: float = -np.min(z)
         z0: np.ndarray = z if alpha_d < 0 else z + 1 + alpha_d
 
-        initial_obj: float = (0.5 * (x0.T @ (self.prob.Q @ x0)) + self.prob.q.T @ x0).flatten()[0]
+        initial_obj: float = (0.5 * (x0.T @ (self.prob.Q @ x0)) + self.prob.q.T @ x0).item()
 
         initial_res: Residuals = self.calc_residuals(x0, s0, z0, y0)
 
@@ -172,11 +176,11 @@ class Solver:
         delta_z_aff: np.ndarray = delta_aff[self.prob.n + self.prob.p : self.prob.n + 2 * self.prob.p]
 
         # Compute centering-plus-corrector directions
-        mu: np.ndarray = (state.s.T @ state.z).item() / self.prob.p
+        mu: float = (state.s.T @ state.z).item() / self.prob.p
 
         alpha: float = min(1, self.max_step(state.s, delta_s_aff), self.max_step(state.z, delta_z_aff))
         sigma: float = (
-            (state.s + alpha * delta_s_aff).T @ (state.z + alpha * delta_z_aff) / (state.s.T @ state.z).item()
+            ((state.s + alpha * delta_s_aff).T @ (state.z + alpha * delta_z_aff)).item() / (state.s.T @ state.z).item()
         ) ** 3
 
         RHS_cc_row1: np.ndarray = np.zeros([self.prob.n, 1])
@@ -204,7 +208,7 @@ class Solver:
         y_new: np.ndarray = state.y + step_size * delta_y
 
         # Find updated value of objective function
-        obj: float = (0.5 * (x_new.T @ (self.prob.Q @ x_new)) + self.prob.q.T @ x_new).flatten()[0]
+        obj: float = (0.5 * (x_new.T @ (self.prob.Q @ x_new)) + self.prob.q.T @ x_new).item()
 
         # Find new Residuals
         new_res: Residuals = self.calc_residuals(x_new, s_new, z_new, y_new)
@@ -219,24 +223,51 @@ class Solver:
 
         return new_state
 
-    def solve(self) -> list[SolverState]:
+    def solve(self) -> tuple[Result, list[SolverState]]:
         """Solve problem from start to finish, returning state history."""
-        state_history: list[SolverState] = [self.find_initial_state()]
+        try:
+            state_history: list[SolverState] = [self.find_initial_state()]
+        except Exception as e:
+            convergence: bool = False
+            error_msg: str = "Failed to find initial state, error: " + str(e)
+            final_state: SolverState = SolverState(0, 0.0, 0, 0, 0, 0, Residuals(0.0, 0.0, 0.0, 0.0), 0.0)
 
-        while state_history[-1].iter < self.max_iter:
-            if state_history[-1].residuals.converged(self.tol):
-                break
+            print(error_msg)
+            return (Result(convergence, error_msg, final_state), [])
 
-            state_history.append(self.step(state_history[-1]))
+        try:
+            while state_history[-1].iter < self.max_iter:
+                if self.converged(state_history[-1]):
+                    break
 
-        return state_history
+                state_history.append(self.step(state_history[-1]))
+        except Exception as e:
+            convergence: bool = False
+            error_msg: str = "Failed while solving, error: " + str(e)
+            final_state: SolverState = state_history[-1]
+
+            print(divider)
+            print(error_msg)
+            return (Result(convergence, error_msg, final_state), state_history)
+
+        final_state: SolverState = state_history[-1]
+        convergence: bool = self.converged(final_state)
+        error_msg: str = "None"
+
+        result: Result = Result(convergence, error_msg, final_state)
+
+        print(divider)
+        print(f"Solved in {final_state.iter} iterations, objective value = {final_state.obj:.8g}.")
+
+        return (result, state_history)
 
     def calc_residuals(self, x: np.ndarray, s: np.ndarray, z: np.ndarray, y: np.ndarray) -> Residuals:
         """Calculate residuals given state."""
-        primal_ineq: float = np.linalg.norm(self.prob.G @ x + s - self.prob.h)
-        primal_eq: float = np.linalg.norm(self.prob.A @ x - self.prob.b)
-        stationarity: float = np.linalg.norm(self.prob.Q @ x + self.prob.q + self.prob.G.T @ z + self.prob.A.T @ y)
-        duality: float = np.linalg.norm(z.T @ s)
+        prob: Problem = self.prob
+        primal_ineq: float = np.linalg.norm(prob.G @ x + s - prob.h, np.inf)
+        primal_eq: float = np.linalg.norm(prob.A @ x - prob.b, np.inf)
+        stationarity: float = np.linalg.norm(prob.Q @ x + prob.q + prob.G.T @ z + prob.A.T @ y, np.inf)
+        duality: float = abs(z.T @ s).item()
 
         return Residuals(primal_ineq, primal_eq, stationarity, duality)
 
@@ -244,6 +275,40 @@ class Solver:
         """Calculate max step in v direction given dv."""
         ratios: np.ndarray = -v[dv < 0] / dv[dv < 0]
         return float(ratios.min()) if len(ratios) > 0 else float("inf")
+
+    def converged(self, state: SolverState) -> bool:
+        """Check residuals, duality gap, and stationarity to evaluate convergence."""
+        prob: Problem = self.prob
+        res: Residuals = state.residuals
+
+        primal_feas_check: bool = max(res.primal_ineq, res.primal_eq) < self.tol * (
+            1 + max(
+                np.linalg.norm(prob.A @ state.x, np.inf),
+                np.linalg.norm(prob.b, np.inf),
+                np.linalg.norm(prob.G @ state.x, np.inf),
+                np.linalg.norm(prob.h, np.inf),
+                np.linalg.norm(state.s, np.inf),
+            )
+        )
+
+        stationarity_check: bool = res.stationarity < self.tol * (
+            1 + max(
+                np.linalg.norm(prob.Q @ state.x, np.inf),
+                np.linalg.norm(prob.A.T @ state.y, np.inf),
+                np.linalg.norm(prob.G.T @ state.z, np.inf),
+                np.linalg.norm(prob.q, np.inf),
+            )
+        )
+
+        duality_check: bool = res.duality < self.tol * (
+            1 + max(
+                1,
+                abs((0.5 * state.x.T @ (prob.Q @ state.x) + prob.q.T @ state.x).item()),
+                abs((-0.5 * state.x.T @ (prob.Q @ state.x) - prob.b.T @ state.y - prob.h.T @ state.z).item()),
+            )
+        )
+
+        return all([primal_feas_check, stationarity_check, duality_check])
 
     def _print_header(self) -> None:
         print(divider)
