@@ -67,7 +67,7 @@ class Result:
     """Stores final result of solver."""
 
     convergence: bool
-    error_msg: str
+    msg: str
     final_state: SolverState
 
 @dataclass(frozen=True)
@@ -229,11 +229,11 @@ class Solver:
             state_history: list[SolverState] = [self.find_initial_state()]
         except Exception as e:
             convergence: bool = False
-            error_msg: str = "Failed to find initial state, error: " + str(e)
+            msg: str = "Failed to find initial state, error: " + str(e)
             final_state: SolverState = SolverState(0, 0.0, 0, 0, 0, 0, Residuals(0.0, 0.0, 0.0, 0.0), 0.0)
 
-            print(error_msg)
-            return (Result(convergence, error_msg, final_state), [])
+            print(msg)
+            return (Result(convergence, msg, final_state), [])
 
         try:
             while state_history[-1].iter < self.max_iter:
@@ -243,21 +243,24 @@ class Solver:
                 state_history.append(self.step(state_history[-1]))
         except Exception as e:
             convergence: bool = False
-            error_msg: str = "Failed while solving, error: " + str(e)
+            msg: str = "Failed while solving, error: " + str(e)
             final_state: SolverState = state_history[-1]
 
             print(divider)
-            print(error_msg)
-            return (Result(convergence, error_msg, final_state), state_history)
+            print(msg)
+            return (Result(convergence, msg, final_state), state_history)
 
         final_state: SolverState = state_history[-1]
         convergence: bool = self.converged(final_state)
-        error_msg: str = "None"
+        if convergence:
+            msg = f"Solved in {final_state.iter} iterations, objective value = {final_state.obj:.8g}."
+        else:
+            msg = "Failed to converge before iteration limit."
 
-        result: Result = Result(convergence, error_msg, final_state)
+        result: Result = Result(convergence, msg, final_state)
 
         print(divider)
-        print(f"Solved in {final_state.iter} iterations, objective value = {final_state.obj:.8g}.")
+        print(msg)
 
         return (result, state_history)
 
