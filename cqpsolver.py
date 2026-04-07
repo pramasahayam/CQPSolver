@@ -79,6 +79,10 @@ class Solver:
     max_iter: int = 25
     quiet: bool = False
 
+    def __post_init__(self) -> None:
+        """Initialize KKT cache."""
+        object.__setattr__(self, "KKT_cache", {})
+
     def find_initial_state(self) -> SolverState:
         """Calculate the initial point (x0, s0, y0, z0)."""
         # Set up and solve linear system
@@ -125,43 +129,86 @@ class Solver:
 
         return initial_state
 
-    def step(self, state: SolverState) -> SolverState:
-        """Compute next state given current state."""
+    def build_KKT(self, state: SolverState) -> None:
+        """Build KKT system from scratch and cache it, along with s and z positions."""
         # Setup and solve KKT system for affine scaling directions
+        prob = self.prob
+        n = prob.n
+        m = prob.m
+        p = prob.p
+        s = state.s
+        z = state.z
         LHS_row1: sp.csc_array = sp.hstack(
             [
-                self.prob.Q,
-                sp.csc_array((self.prob.n, self.prob.p)),
-                self.prob.G.T,
-                self.prob.A.T,
+                prob.Q,
+                sp.csc_array((n, p)),
+                prob.G.T,
+                prob.A.T,
             ],
         )
         LHS_row2: sp.csc_array = sp.hstack(
             [
-                sp.csc_array((self.prob.p, self.prob.n)),
-                sp.diags_array(state.z.flatten()),
-                sp.diags_array(state.s.flatten()),
-                sp.csc_array((self.prob.p, self.prob.m)),
+                sp.csc_array((p, n)),
+                sp.diags_array(z.flatten()),
+                sp.diags_array(s.flatten()),
+                sp.csc_array((p, m)),
             ],
         )
         LHS_row3: sp.csc_array = sp.hstack(
             [
-                self.prob.G,
-                sp.eye(self.prob.p),
-                sp.csc_array((self.prob.p, self.prob.p)),
-                sp.csc_array((self.prob.p, self.prob.m)),
+                prob.G,
+                sp.eye(p),
+                sp.csc_array((p, p)),
+                sp.csc_array((p, m)),
             ],
         )
         LHS_row4: sp.csc_array = sp.hstack(
             [
-                self.prob.A,
-                sp.csc_array((self.prob.m, self.prob.p)),
-                sp.csc_array((self.prob.m, self.prob.p)),
-                sp.csc_array((self.prob.m, self.prob.m)),
+                prob.A,
+                sp.csc_array((m, p)),
+                sp.csc_array((m, p)),
+                sp.csc_array((m, m)),
             ],
         )
+
         LHS: sp.csc_array = sp.vstack([LHS_row1, LHS_row2, LHS_row3, LHS_row4], format="csc")
-        solve_KKT: Callable[[np.ndarray], np.ndarray] = sp.linalg.factorized(LHS)
+
+        # Finding block where diag(z) is
+        col_start_z, col_end_z = n, n + p
+        ptr_start_z, ptr_end_z = LHS.indptr[col_start_z], LHS.indptr[col_end_z]
+
+        # Find non-zero elements
+        counts_z = np.diff(LHS.indptr[col_start_z : col_end_z + 1])
+        cols_z = np.repeat(np.arange(col_start_z, col_end_z), counts_z)
+
+        # Find diag, i.e. row == col, mask z block appropriately
+        mask_z = LHS.indices[ptr_start_z:ptr_end_z] == cols_z
+        z_data_idx = np.arange(ptr_start_z, ptr_end_z)[mask_z]
+
+        col_start_s, col_end_s = n + p, n + 2 * p
+        ptr_start_s, ptr_end_s = LHS.indptr[col_start_s], LHS.indptr[col_end_s]
+
+        counts_s: np.ndarray = np.diff(LHS.indptr[col_start_s : col_end_s + 1])
+        cols_s: np.ndarray = np.repeat(np.arange(col_start_s, col_end_s), counts_s)
+
+        mask_s: np.ndarray = LHS.indices[ptr_start_s:ptr_end_s] == cols_s - p
+        s_data_idx: np.ndarray = np.arange(ptr_start_s, ptr_end_s)[mask_s]
+
+        # Store LHS and z/s indices in Solver cache
+        cache: dict = self.KKT_cache
+        cache["LHS"]: sp.csc_array = LHS
+        cache["z_data_idx"]: np.ndarray = z_data_idx
+        cache["s_data_idx"]: np.ndarray = s_data_idx
+
+    def step(self, state: SolverState) -> SolverState:
+        """Compute next state given current state."""
+        cache: dict = self.KKT_cache
+        if "LHS" not in cache:
+            self.build_KKT(state)
+        else:
+            cache["LHS"].data[cache["z_data_idx"]]: sp.csc_array = state.z.flatten()
+            cache["LHS"].data[cache["s_data_idx"]]: sp.csc_array = state.s.flatten()
+        solve_KKT: Callable[[np.ndarray], np.ndarray] = sp.linalg.factorized(cache["LHS"])
 
         RHS_aff_row1: np.ndarray = -(
             self.prob.Q @ state.x + self.prob.q + self.prob.G.T @ state.z + self.prob.A.T @ state.y
@@ -214,9 +261,7 @@ class Solver:
         new_res: Residuals = self.calc_residuals(x_new, s_new, z_new, y_new)
 
         # Create new SolverState
-        new_state: SolverState = SolverState(
-            iter=state.iter + 1, obj=obj, x=x_new, s=s_new, z=z_new, y=y_new, residuals=new_res, step_size=step_size,
-        )
+        new_state: SolverState = SolverState(state.iter + 1, obj, x_new, s_new, z_new, y_new, new_res, step_size)
 
         if not self.quiet:
             self._print_row(new_state)
@@ -232,7 +277,9 @@ class Solver:
             msg: str = "Failed to find initial state, error: " + str(e)
             final_state: SolverState = SolverState(0, 0.0, 0, 0, 0, 0, Residuals(0.0, 0.0, 0.0, 0.0), 0.0)
 
-            print(msg)
+            if not self.quiet:
+                print(msg)
+
             return (Result(convergence, msg, final_state), [])
 
         try:
@@ -246,8 +293,10 @@ class Solver:
             msg: str = "Failed while solving, error: " + str(e)
             final_state: SolverState = state_history[-1]
 
-            print(divider)
-            print(msg)
+            if not self.quiet:
+                print(divider)
+                print(msg)
+
             return (Result(convergence, msg, final_state), state_history)
 
         final_state: SolverState = state_history[-1]
@@ -259,8 +308,9 @@ class Solver:
 
         result: Result = Result(convergence, msg, final_state)
 
-        print(divider)
-        print(msg)
+        if not self.quiet:
+            print(divider)
+            print(msg)
 
         return (result, state_history)
 
