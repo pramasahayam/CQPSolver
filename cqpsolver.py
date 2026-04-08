@@ -1,8 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.sparse as sp
+from sksparse.umfpack import UMFFactor, umf_factor
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -70,7 +71,7 @@ class Result:
     msg: str
     final_state: SolverState
 
-@dataclass(frozen=True)
+@dataclass
 class Solver:
     """Primal-dual interior point method solver for convex QPs."""
 
@@ -78,6 +79,7 @@ class Solver:
     tol: float = 1e-6
     max_iter: int = 25
     quiet: bool = False
+    _LHS_solver: UMFFactor | None = field(default=None, init=False, repr=False)
 
     def find_initial_state(self) -> SolverState:
         """Calculate the initial point (x0, s0, y0, z0)."""
@@ -138,13 +140,17 @@ class Solver:
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs) @ prob.G
         H: sp.csc_array = prob.Q + GTzsG  # (n,n)
         LHS: sp.csc_array = sp.block_array([[H, prob.A.T], [prob.A, None]], format="csc") if m > 0 else sp.csc_array(H)
-        solve_KKT: Callable[[sp.csc_array], np.ndarray] = sp.linalg.factorized(LHS)
+
+        if self._LHS_solver is None:
+            self._LHS_solver = umf_factor(LHS)
+        else:
+            self._LHS_solver.factorize(LHS)
 
         def solve_reduced(r1: np.ndarray, r2: np.ndarray, r3: np.ndarray, r4: np.ndarray) -> tuple[np.ndarray]:
             rhs_x: np.ndarray = r1 - prob.G.T @ ((r2 - z.reshape(-1,1) * r3) / s.reshape(-1,1))
             rhs: np.ndarray = np.vstack([rhs_x, r4]) if prob.m > 0 else rhs_x
 
-            sol: np.ndarray = solve_KKT(rhs.flatten()).reshape(-1, 1)
+            sol: np.ndarray = self._LHS_solver.solve(rhs.flatten()).reshape(-1, 1)
             dx: np.ndarray = sol[:n]
             dy: np.ndarray = sol[n:] if prob.m > 0 else np.zeros((0, 1))
             ds: np.ndarray = r3 - prob.G @ dx

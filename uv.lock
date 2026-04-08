@@ -145,6 +145,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "scikit-sparse" },
     { name = "scipy" },
 ]
 
@@ -158,6 +159,7 @@ dev = [
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.1" },
+    { name = "scikit-sparse", specifier = ">=0.5.0" },
     { name = "scipy", specifier = ">=1.17.0" },
 ]
 
@@ -755,6 +757,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/70/d8/78b1bad170f93fcf5e3536e70e8fadac55030002275c9a29e8f5719185de/pyzmq-27.1.0-cp314-cp314t-win_amd64.whl", hash = "sha256:19c9468ae0437f8074af379e986c5d3d7d7bfe033506af442e8c879732bedbe0", size = 661401, upload-time = "2025-09-08T23:08:59.802Z" },
     { url = "https://files.pythonhosted.org/packages/81/d6/4bfbb40c9a0b42fc53c7cf442f6385db70b40f74a783130c5d0a5aa62228/pyzmq-27.1.0-cp314-cp314t-win_arm64.whl", hash = "sha256:dc5dbf68a7857b59473f7df42650c621d7e8923fb03fa74a526890f4d33cc4d7", size = 575170, upload-time = "2025-09-08T23:09:01.418Z" },
 ]
+
+[[package]]
+name = "scikit-sparse"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/70/2351a8755de0b3d9821864299d6bba3feafb91e106b9b762a2675910392e/scikit_sparse-0.5.0.tar.gz", hash = "sha256:217579251b1d91dcfeab5a16d6408f462dc353939f9e5dfa65ec0b41f0b603dc", size = 106285, upload-time = "2026-03-03T19:18:41.586Z" }
 
 [[package]]
 name = "scipy"
