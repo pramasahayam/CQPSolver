@@ -79,10 +79,6 @@ class Solver:
     max_iter: int = 25
     quiet: bool = False
 
-    def __post_init__(self) -> None:
-        """Initialize KKT cache."""
-        object.__setattr__(self, "KKT_cache", {})
-
     def find_initial_state(self) -> SolverState:
         """Calculate the initial point (x0, s0, y0, z0)."""
         # Set up and solve linear system
@@ -129,133 +125,66 @@ class Solver:
 
         return initial_state
 
-    def build_KKT(self, state: SolverState) -> None:
-        """Build KKT system from scratch and cache it, along with s and z positions."""
-        # Setup and solve KKT system for affine scaling directions
-        prob = self.prob
-        n = prob.n
-        m = prob.m
-        p = prob.p
-        s = state.s
-        z = state.z
-        LHS_row1: sp.csc_array = sp.hstack(
-            [
-                prob.Q,
-                sp.csc_array((n, p)),
-                prob.G.T,
-                prob.A.T,
-            ],
-        )
-        LHS_row2: sp.csc_array = sp.hstack(
-            [
-                sp.csc_array((p, n)),
-                sp.diags_array(z.flatten()),
-                sp.diags_array(s.flatten()),
-                sp.csc_array((p, m)),
-            ],
-        )
-        LHS_row3: sp.csc_array = sp.hstack(
-            [
-                prob.G,
-                sp.eye(p),
-                sp.csc_array((p, p)),
-                sp.csc_array((p, m)),
-            ],
-        )
-        LHS_row4: sp.csc_array = sp.hstack(
-            [
-                prob.A,
-                sp.csc_array((m, p)),
-                sp.csc_array((m, p)),
-                sp.csc_array((m, m)),
-            ],
-        )
-
-        LHS: sp.csc_array = sp.vstack([LHS_row1, LHS_row2, LHS_row3, LHS_row4], format="csc")
-
-        # Finding block where diag(z) is
-        col_start_z, col_end_z = n, n + p
-        ptr_start_z, ptr_end_z = LHS.indptr[col_start_z], LHS.indptr[col_end_z]
-
-        # Find non-zero elements
-        counts_z = np.diff(LHS.indptr[col_start_z : col_end_z + 1])
-        cols_z = np.repeat(np.arange(col_start_z, col_end_z), counts_z)
-
-        # Find diag, i.e. row == col, mask z block appropriately
-        mask_z = LHS.indices[ptr_start_z:ptr_end_z] == cols_z
-        z_data_idx = np.arange(ptr_start_z, ptr_end_z)[mask_z]
-
-        col_start_s, col_end_s = n + p, n + 2 * p
-        ptr_start_s, ptr_end_s = LHS.indptr[col_start_s], LHS.indptr[col_end_s]
-
-        counts_s: np.ndarray = np.diff(LHS.indptr[col_start_s : col_end_s + 1])
-        cols_s: np.ndarray = np.repeat(np.arange(col_start_s, col_end_s), counts_s)
-
-        mask_s: np.ndarray = LHS.indices[ptr_start_s:ptr_end_s] == cols_s - p
-        s_data_idx: np.ndarray = np.arange(ptr_start_s, ptr_end_s)[mask_s]
-
-        # Store LHS and z/s indices in Solver cache
-        cache: dict = self.KKT_cache
-        cache["LHS"]: sp.csc_array = LHS
-        cache["z_data_idx"]: np.ndarray = z_data_idx
-        cache["s_data_idx"]: np.ndarray = s_data_idx
-
     def step(self, state: SolverState) -> SolverState:
         """Compute next state given current state."""
-        cache: dict = self.KKT_cache
-        if "LHS" not in cache:
-            self.build_KKT(state)
-        else:
-            cache["LHS"].data[cache["z_data_idx"]]: sp.csc_array = state.z.flatten()
-            cache["LHS"].data[cache["s_data_idx"]]: sp.csc_array = state.s.flatten()
-        solve_KKT: Callable[[np.ndarray], np.ndarray] = sp.linalg.factorized(cache["LHS"])
+        prob: Problem = self.prob
+        n: int = prob.n
+        m: int = prob.m
+        p: int = prob.p
+        s, z = state.s.flatten(), state.z.flatten()
+        zs: np.ndarray = z / s
 
-        RHS_aff_row1: np.ndarray = -(
-            self.prob.Q @ state.x + self.prob.q + self.prob.G.T @ state.z + self.prob.A.T @ state.y
-        )
-        RHS_aff_row2: np.ndarray = -state.s * state.z
-        RHS_aff_row3: np.ndarray = -(self.prob.G @ state.x + state.s - self.prob.h)
-        RHS_aff_row4: np.ndarray = -(self.prob.A @ state.x - self.prob.b)
-        RHS_aff: np.ndarray = np.vstack([RHS_aff_row1, RHS_aff_row2, RHS_aff_row3, RHS_aff_row4])
+        # Build reduced (n+m) x (n+m) system once per iteration
+        GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs) @ prob.G
+        H: sp.csc_array = prob.Q + GTzsG  # (n,n)
+        LHS: sp.csc_array = sp.block_array([[H, prob.A.T], [prob.A, None]], format="csc") if m > 0 else sp.csc_array(H)
+        solve_KKT: Callable[[sp.csc_array], np.ndarray] = sp.linalg.factorized(LHS)
 
-        delta_aff: np.ndarray = (solve_KKT(RHS_aff.flatten())).reshape(-1, 1)
-        delta_s_aff: np.ndarray = delta_aff[self.prob.n : self.prob.n + self.prob.p]
-        delta_z_aff: np.ndarray = delta_aff[self.prob.n + self.prob.p : self.prob.n + 2 * self.prob.p]
+        def solve_reduced(r1: np.ndarray, r2: np.ndarray, r3: np.ndarray, r4: np.ndarray) -> tuple[np.ndarray]:
+            rhs_x: np.ndarray = r1 - prob.G.T @ ((r2 - z.reshape(-1,1) * r3) / s.reshape(-1,1))
+            rhs: np.ndarray = np.vstack([rhs_x, r4]) if prob.m > 0 else rhs_x
 
-        # Compute centering-plus-corrector directions
-        mu: float = (state.s.T @ state.z).item() / self.prob.p
+            sol: np.ndarray = solve_KKT(rhs.flatten()).reshape(-1, 1)
+            dx: np.ndarray = sol[:n]
+            dy: np.ndarray = sol[n:] if prob.m > 0 else np.zeros((0, 1))
+            ds: np.ndarray = r3 - prob.G @ dx
+            dz: np.ndarray = (r2 - z.reshape(-1,1) * ds) / s.reshape(-1,1)
 
-        alpha: float = min(1, self.max_step(state.s, delta_s_aff), self.max_step(state.z, delta_z_aff))
-        sigma: float = (
-            ((state.s + alpha * delta_s_aff).T @ (state.z + alpha * delta_z_aff)).item() / (state.s.T @ state.z).item()
-        ) ** 3
+            return dx, ds, dz, dy
 
-        RHS_cc_row1: np.ndarray = np.zeros([self.prob.n, 1])
-        RHS_cc_row2: np.ndarray = sigma * mu - delta_s_aff * delta_z_aff
-        RHS_cc_row3: np.ndarray = np.zeros([self.prob.p, 1])
-        RHS_cc_row4: np.ndarray = np.zeros([self.prob.m, 1])
-        RHS_cc: np.ndarray = np.vstack([RHS_cc_row1, RHS_cc_row2, RHS_cc_row3, RHS_cc_row4])
+        # Affine scaling RHS
+        r1_aff: np.ndarray = -(prob.Q @ state.x + prob.q + prob.G.T @ state.z + prob.A.T @ state.y)
+        r2_aff: np.ndarray = -state.s * state.z
+        r3_aff: np.ndarray = -(prob.G @ state.x + state.s - prob.h)
+        r4_aff: np.ndarray = -(prob.A @ state.x - prob.b)
 
-        delta_cc: np.ndarray = (solve_KKT(RHS_cc.flatten())).reshape(-1, 1)
+        dx_aff, ds_aff, dz_aff, dy_aff = solve_reduced(r1_aff, r2_aff, r3_aff, r4_aff)
+
+        # Centering-corrector RHS
+        mu: float = (state.s.T @ state.z).item() / p
+        alpha: float = min(1, self.max_step(state.s, ds_aff), self.max_step(state.z, dz_aff))
+        sigma: float = (((state.s + alpha * ds_aff).T @ (state.z + alpha * dz_aff)) / (state.s.T @ state.z)).item() ** 3
+
+        r2_cc: np.ndarray = sigma * mu - ds_aff * dz_aff
+        dx_cc, ds_cc, dz_cc, dy_cc = solve_reduced(np.zeros((n, 1)), r2_cc, np.zeros((p, 1)), np.zeros((m, 1)))
 
         # Combine aff and cc directions
-        delta: np.ndarray = delta_aff + delta_cc
-        delta_x: np.ndarray = delta[: self.prob.n]
-        delta_s: np.ndarray = delta[self.prob.n : self.prob.n + self.prob.p]
-        delta_z: np.ndarray = delta[self.prob.n + self.prob.p : self.prob.n + 2 * self.prob.p]
-        delta_y: np.ndarray = delta[-self.prob.m :] if self.prob.m > 0 else np.zeros((0, 1))
+        dx: np.ndarray = dx_aff + dx_cc
+        ds: np.ndarray = ds_aff + ds_cc
+        dz: np.ndarray = dz_aff + dz_cc
+        dy: np.ndarray = dy_aff + dy_cc
 
         # Compute step size to maintain nonnegativity of s and z
-        step_size: float = min(1, 0.9999 * min(self.max_step(state.s, delta_s), self.max_step(state.z, delta_z)))
+        step_size: float = min(1, 0.9999 * min(self.max_step(state.s, ds), self.max_step(state.z, dz)))
 
         # Update primal and dual variables
-        x_new: np.ndarray = state.x + step_size * delta_x
-        s_new: np.ndarray = state.s + step_size * delta_s
-        z_new: np.ndarray = state.z + step_size * delta_z
-        y_new: np.ndarray = state.y + step_size * delta_y
+        x_new: np.ndarray = state.x + step_size * dx
+        s_new: np.ndarray = state.s + step_size * ds
+        z_new: np.ndarray = state.z + step_size * dz
+        y_new: np.ndarray = state.y + step_size * dy
 
         # Find updated value of objective function
-        obj: float = (0.5 * (x_new.T @ (self.prob.Q @ x_new)) + self.prob.q.T @ x_new).item()
+        obj: float = (0.5 * (x_new.T @ (prob.Q @ x_new)) + prob.q.T @ x_new).item()
 
         # Find new Residuals
         new_res: Residuals = self.calc_residuals(x_new, s_new, z_new, y_new)
