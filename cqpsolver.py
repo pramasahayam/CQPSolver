@@ -153,6 +153,7 @@ class Solver:
             self._LHS_solver.factorize(LHS)
 
         def solve_reduced(r1: np.ndarray, r2: np.ndarray, r3: np.ndarray, r4: np.ndarray) -> tuple[np.ndarray]:
+            """Solve reduced KKT system and converts to solution for orignal system."""
             rhs_x: np.ndarray = r1 - prob.G.T @ ((r2 - z.reshape(-1,1) * r3) / s.reshape(-1,1))
             rhs: np.ndarray = np.vstack([rhs_x, r4]) if prob.m > 0 else rhs_x
 
@@ -178,6 +179,7 @@ class Solver:
         sigma: float = (((state.s + alpha * ds_aff).T @ (state.z + alpha * dz_aff)) / (state.s.T @ state.z)).item() ** 3
 
         r2_cc: np.ndarray = sigma * mu - ds_aff * dz_aff
+
         dx_cc, ds_cc, dz_cc, dy_cc = solve_reduced(np.zeros((n, 1)), r2_cc, np.zeros((p, 1)), np.zeros((m, 1)))
 
         # Combine aff and cc directions
