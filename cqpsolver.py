@@ -126,15 +126,12 @@ class Solver:
     def step(self, state: SolverState) -> SolverState:
         """Compute next state given current state."""
         prob: Problem = self.prob
-        n: int = prob.n
-        m: int = prob.m
-        p: int = prob.p
+        n, m, p = prob.n, prob.m, prob.p
         s, z = state.s.flatten(), state.z.flatten()
         zs: np.ndarray = z / s
 
-        # Static regularization values
+        # Static regularization value
         delta = 1e-8
-        epsilon = 1e-8
 
         # Build reduced (n+m) x (n+m) system once per iteration
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs) @ prob.G
@@ -147,7 +144,7 @@ class Solver:
 
         # Regularized LHS
         LHS: sp.csc_array = sp.block_array(
-            [[LHS_11 + delta * sp.eye(n), prob.A.T], [prob.A, -epsilon * sp.eye(m)]], format="csc",
+            [[LHS_11 + delta * sp.eye(n), prob.A.T], [prob.A, sp.csc_array((m, m))]], format="csc",
         ) if m > 0 else LHS_11 + delta * sp.eye(n)
 
         if self._LHS_solver is None:
