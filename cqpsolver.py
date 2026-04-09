@@ -136,10 +136,16 @@ class Solver:
         s, z = state.s.flatten(), state.z.flatten()
         zs: np.ndarray = z / s
 
+        # Static regularization values
+        delta = 1e-8
+        epsilon = 1e-8
+
         # Build reduced (n+m) x (n+m) system once per iteration
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs) @ prob.G
-        H: sp.csc_array = prob.Q + GTzsG  # (n,n)
-        LHS: sp.csc_array = sp.block_array([[H, prob.A.T], [prob.A, None]], format="csc") if m > 0 else sp.csc_array(H)
+        LHS_11: sp.csc_array = prob.Q + GTzsG + delta * sp.eye(n)
+        LHS: sp.csc_array = sp.block_array(
+            [[LHS_11, prob.A.T], [prob.A, -epsilon * sp.eye(m)]], format="csc",
+        ) if m > 0 else LHS_11
 
         if self._LHS_solver is None:
             self._LHS_solver = umf_factor(LHS)
