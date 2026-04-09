@@ -1,12 +1,8 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.sparse as sp
 from sksparse.umfpack import UMFFactor, umf_factor
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 header: str = (
     f"{'Iter.':^5} │ {'Objective':^14} │ {'Primal Inequality':^17} │ "
