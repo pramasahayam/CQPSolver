@@ -76,7 +76,7 @@ class Solver:
     """Primal-dual interior point method solver for convex QPs."""
 
     prob: Problem
-    tol: float = 1e-6
+    tol: float = 1e-8
     max_iter: int = 25
     quiet: bool = False
     _LHS_solver: UMFFactor | None = field(default=None, init=False, repr=False)
@@ -142,10 +142,17 @@ class Solver:
 
         # Build reduced (n+m) x (n+m) system once per iteration
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs) @ prob.G
-        LHS_11: sp.csc_array = prob.Q + GTzsG + delta * sp.eye(n)
-        LHS: sp.csc_array = sp.block_array(
-            [[LHS_11, prob.A.T], [prob.A, -epsilon * sp.eye(m)]], format="csc",
+        LHS_11: sp.csc_array = prob.Q + GTzsG
+
+        # Unregularzed LHS for iterative refinement
+        LHS_orig: sp.csc_array = sp.block_array(
+            [[LHS_11, prob.A.T], [prob.A, sp.csc_array((m, m))]], format="csc",
         ) if m > 0 else LHS_11
+
+        # Regularized LHS
+        LHS: sp.csc_array = sp.block_array(
+            [[LHS_11 + delta * sp.eye(n), prob.A.T], [prob.A, -epsilon * sp.eye(m)]], format="csc",
+        ) if m > 0 else LHS_11 + delta * sp.eye(n)
 
         if self._LHS_solver is None:
             self._LHS_solver = umf_factor(LHS)
@@ -153,15 +160,22 @@ class Solver:
             self._LHS_solver.factorize(LHS)
 
         def solve_reduced(r1: np.ndarray, r2: np.ndarray, r3: np.ndarray, r4: np.ndarray) -> tuple[np.ndarray]:
-            """Solve reduced KKT system and converts to solution for orignal system."""
-            rhs_x: np.ndarray = r1 - prob.G.T @ ((r2 - z.reshape(-1,1) * r3) / s.reshape(-1,1))
+            """Solve reduced KKT system with iterative refinement and return solution to original system."""
+            rhs_x: np.ndarray = r1 - prob.G.T @ ((r2 - z.reshape(-1, 1) * r3) / s.reshape(-1, 1))
             rhs: np.ndarray = np.vstack([rhs_x, r4]) if prob.m > 0 else rhs_x
 
             sol: np.ndarray = self._LHS_solver.solve(rhs.flatten()).reshape(-1, 1)
+
+            # Iterative refinement of regularized solution
+            for _ in range(2):
+                residual: np.ndarray = rhs - LHS_orig @ sol
+                correction: np.ndarray = self._LHS_solver.solve(residual.flatten()).reshape(-1, 1)
+                sol: np.ndarray = sol + correction
+
             dx: np.ndarray = sol[:n]
             dy: np.ndarray = sol[n:] if prob.m > 0 else np.zeros((0, 1))
             ds: np.ndarray = r3 - prob.G @ dx
-            dz: np.ndarray = (r2 - z.reshape(-1,1) * ds) / s.reshape(-1,1)
+            dz: np.ndarray = (r2 - z.reshape(-1, 1) * ds) / s.reshape(-1, 1)
 
             return dx, ds, dz, dy
 
