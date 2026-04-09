@@ -196,7 +196,7 @@ class Solver:
         dy: np.ndarray = dy_aff + dy_cc
 
         # Compute step size to maintain nonnegativity of s and z
-        step_size: float = min(1, 0.9999 * min(self.max_step(state.s, ds), self.max_step(state.z, dz)))
+        step_size: float = min(1, 0.99 * min(self.max_step(state.s, ds), self.max_step(state.z, dz)))
 
         # Update primal and dual variables
         x_new: np.ndarray = state.x + step_size * dx
