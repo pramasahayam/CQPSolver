@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 
 import numpy as np
-import scipy.sparse as sp # type:ignore
-from sksparse.umfpack import UMFFactor, umf_factor # type:ignore
+import scipy.sparse as sp  # type:ignore[import-untyped]
+from sksparse.umfpack import UMFFactor, umf_factor  # type:ignore[import-untyped]
 
 header: str = (
     f"{'Iter.':^5} │ {'Objective':^14} │ {'Primal Inequality':^17} │ "
@@ -10,6 +10,7 @@ header: str = (
 )
 
 divider: str = "─" * len(header)
+
 
 @dataclass(frozen=True)
 class Problem:
@@ -37,6 +38,7 @@ class Problem:
         """Size of b vector."""
         return self.b.size
 
+
 @dataclass(frozen=True)
 class Residuals:
     """Stores the residuals for a state."""
@@ -45,6 +47,7 @@ class Residuals:
     primal_eq: float
     stationarity: float
     duality: float
+
 
 @dataclass(frozen=True)
 class SolverState:
@@ -59,6 +62,7 @@ class SolverState:
     residuals: Residuals
     step_size: float | None
 
+
 @dataclass(frozen=True)
 class Result:
     """Stores final result of solver."""
@@ -66,6 +70,7 @@ class Result:
     convergence: bool
     msg: str
     final_state: SolverState
+
 
 @dataclass
 class Solver:
@@ -115,7 +120,14 @@ class Solver:
         initial_res: Residuals = self.calc_residuals(x0, s0, z0, y0)
 
         initial_state: SolverState = SolverState(
-            iter=0, obj=initial_obj, x=x0, s=s0, z=z0, y=y0, residuals=initial_res, step_size=None,
+            iter=0,
+            obj=initial_obj,
+            x=x0,
+            s=s0,
+            z=z0,
+            y=y0,
+            residuals=initial_res,
+            step_size=None,
         )
 
         if not self.quiet:
@@ -139,9 +151,14 @@ class Solver:
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs.ravel()) @ prob.G
         LHS_11: sp.csc_array = prob.Q + GTzsG + delta * sp.eye(n)
 
-        LHS: sp.csc_array = sp.block_array(
-            [[LHS_11, prob.A.T], [prob.A, None]], format="csc",
-        ) if m > 0 else LHS_11
+        LHS: sp.csc_array = (
+            sp.block_array(
+                [[LHS_11, prob.A.T], [prob.A, None]],
+                format="csc",
+            )
+            if m > 0
+            else LHS_11
+        )
 
         if self._LHS_solver is None:
             self._LHS_solver = umf_factor(LHS)
@@ -149,13 +166,16 @@ class Solver:
             self._LHS_solver.factorize(LHS)
 
         def solve_reduced(
-            r1: np.ndarray, r2: np.ndarray, r3: np.ndarray, r4: np.ndarray,
+            r1: np.ndarray,
+            r2: np.ndarray,
+            r3: np.ndarray,
+            r4: np.ndarray,
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             """Solve reduced KKT system and return solution to original system."""
             rhs_x: np.ndarray = r1 - prob.G.T @ ((r2 - z * r3) / s)
             rhs: np.ndarray = np.vstack([rhs_x, r4]) if m > 0 else rhs_x
 
-            sol: np.ndarray = self._LHS_solver.solve(rhs.flatten()).reshape(-1, 1) # type:ignore
+            sol: np.ndarray = self._LHS_solver.solve(rhs.flatten()).reshape(-1, 1)  # type:ignore[union-attr]
 
             # Iterative refinement against the *unregularized* operator.
             # LHS_orig = LHS - delta * diag([I_n, 0_m]), so apply that implicitly.
@@ -165,7 +185,7 @@ class Solver:
                     residual[:n] += delta * sol[:n]
                 else:
                     residual += delta * sol
-                correction: np.ndarray = self._LHS_solver.solve(residual.flatten()).reshape(-1, 1) # type:ignore
+                correction: np.ndarray = self._LHS_solver.solve(residual.flatten()).reshape(-1, 1)  # type:ignore[union-attr]
                 sol = sol + correction
 
             dx: np.ndarray = sol[:n]
@@ -235,8 +255,14 @@ class Solver:
             empty_z = np.zeros((self.prob.p, 1))
             empty_y = np.zeros((self.prob.m, 1))
             final_state = SolverState(
-                iter=0, obj=0.0, x=empty_x, s=empty_s, z=empty_z, y=empty_y,
-                residuals=Residuals(0.0, 0.0, 0.0, 0.0), step_size=None,
+                iter=0,
+                obj=0.0,
+                x=empty_x,
+                s=empty_s,
+                z=empty_z,
+                y=empty_y,
+                residuals=Residuals(0.0, 0.0, 0.0, 0.0),
+                step_size=None,
             )
 
             if not self.quiet:
@@ -296,7 +322,8 @@ class Solver:
         res: Residuals = state.residuals
 
         primal_feas_check: bool = max(res.primal_ineq, res.primal_eq) < self.tol * (
-            1 + max(
+            1
+            + max(
                 np.linalg.norm(prob.A @ state.x, np.inf).item(),
                 np.linalg.norm(prob.b, np.inf).item(),
                 np.linalg.norm(prob.G @ state.x, np.inf).item(),
@@ -306,7 +333,8 @@ class Solver:
         )
 
         stationarity_check: bool = res.stationarity < self.tol * (
-            1 + max(
+            1
+            + max(
                 np.linalg.norm(prob.Q @ state.x, np.inf).item(),
                 np.linalg.norm(prob.A.T @ state.y, np.inf).item(),
                 np.linalg.norm(prob.G.T @ state.z, np.inf).item(),
@@ -315,7 +343,8 @@ class Solver:
         )
 
         duality_check: bool = res.duality < self.tol * (
-            1 + max(
+            1
+            + max(
                 1,
                 abs((0.5 * state.x.T @ (prob.Q @ state.x) + prob.q.T @ state.x).item()),
                 abs((-0.5 * state.x.T @ (prob.Q @ state.x) - prob.b.T @ state.y - prob.h.T @ state.z).item()),
