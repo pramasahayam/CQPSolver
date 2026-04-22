@@ -145,9 +145,7 @@ class Solver:
 
         delta: float = self.reg
 
-        # Build reduced (n+m) x (n+m) system once per iteration. Sparsity pattern of
-        # Q + G^T diag(z/s) G + delta*I is constant across iterations, so UMFPACK's
-        # symbolic factorization is reused via factorize() below.
+        # Build reduced (n+m) x (n+m) system once per iteration
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs.ravel()) @ prob.G
         LHS_11: sp.csc_array = prob.Q + GTzsG + delta * sp.eye(n)
 
@@ -177,8 +175,7 @@ class Solver:
 
             sol: np.ndarray = self._LHS_solver.solve(rhs.flatten()).reshape(-1, 1)  # type:ignore[union-attr]
 
-            # Iterative refinement against the *unregularized* operator.
-            # LHS_orig = LHS - delta * diag([I_n, 0_m]), so apply that implicitly.
+            # Iterative refinement against the unregularized operator.
             for _ in range(self.n_refine):
                 residual: np.ndarray = rhs - (LHS @ sol)
                 if m > 0:
