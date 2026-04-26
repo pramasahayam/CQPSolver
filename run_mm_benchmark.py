@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import os
 import sys
 import time
 from pathlib import Path
@@ -33,6 +35,23 @@ CSV_FIELDNAMES: list[str] = [
     "msg",
     "error",
 ]
+
+
+@contextlib.contextmanager
+def suppress_c_output():
+    """Redirect stdout/stderr at the fd level to silence C-library messages (e.g. UMFPACK)."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved = [os.dup(1), os.dup(2)]
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        os.close(devnull)
+        os.close(saved[0])
+        os.close(saved[1])
 
 
 def parse_mat(filepath: Path) -> Problem:
@@ -94,7 +113,8 @@ def solve_problem(name: str, filepath: Path) -> dict[str, object]:
 
         solver = Solver(prob, max_iter=100, quiet=True, n_refine=2)
         t0 = time.perf_counter()
-        result, _ = solver.solve()
+        with suppress_c_output():
+            result, _ = solver.solve()
         row["solve_time_s"] = time.perf_counter() - t0
 
         fs = result.final_state
