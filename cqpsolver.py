@@ -1,8 +1,9 @@
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.sparse as sp  # type:ignore[import-untyped]
-from sksparse.umfpack import UMFFactor, umf_factor  # type:ignore[import-untyped]
+from sksparse.umfpack import UMFFactor, UMFPACKSingularMatrixWarning, umf_factor  # type:ignore[import-untyped]
 
 header: str = (
     f"{'Iter.':^5} │ {'Objective':^14} │ {'Primal Inequality':^17} │ "
@@ -83,6 +84,7 @@ class Solver:
     reg: float = 1e-8  # Static regularization added to (1,1) block of KKT system.
     n_refine: int = 0  # Iterative refinement passes per Newton solve (0 disables).
     _LHS_solver: UMFFactor | None = field(default=None, init=False, repr=False)
+    _needs_dual_reg: bool = field(default=False, init=False, repr=False)
 
     def find_initial_state(self) -> SolverState:
         """Calculate the initial point (x0, s0, y0, z0)."""
@@ -92,9 +94,9 @@ class Solver:
         # Set up and solve linear system
         LHS: sp.csc_array = sp.block_array(
             [
-                [prob.Q, prob.G.T, prob.A.T],
+                [prob.Q + self.reg * sp.eye(n), prob.G.T, prob.A.T],
                 [prob.G, -sp.eye(p), None],
-                [prob.A, None, None],
+                [prob.A, None, -self.reg * sp.eye(m) if m > 0 else None],
             ],
             format="csc",
         )
@@ -149,19 +151,19 @@ class Solver:
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs.ravel()) @ prob.G
         LHS_11: sp.csc_array = prob.Q + GTzsG + delta * sp.eye(n)
 
-        LHS: sp.csc_array = (
-            sp.block_array(
-                [[LHS_11, prob.A.T], [prob.A, None]],
-                format="csc",
-            )
-            if m > 0
-            else LHS_11
-        )
+        def build_lhs(dual_reg: bool) -> sp.csc_array:
+            if m == 0:
+                return LHS_11
+            block_22 = -delta * sp.eye(m) if dual_reg else None
+            return sp.block_array([[LHS_11, prob.A.T], [prob.A, block_22]], format="csc")
 
-        if self._LHS_solver is None:
-            self._LHS_solver = umf_factor(LHS)
-        else:
-            self._LHS_solver.factorize(LHS)
+        LHS: sp.csc_array = build_lhs(self._needs_dual_reg)
+
+        def factorize_lhs() -> None:
+            if self._LHS_solver is None:
+                self._LHS_solver = umf_factor(LHS)
+            else:
+                self._LHS_solver.factorize(LHS)
 
         def solve_reduced(
             r1: np.ndarray,
@@ -175,13 +177,15 @@ class Solver:
 
             sol: np.ndarray = self._LHS_solver.solve(rhs.flatten()).reshape(-1, 1)  # type:ignore[union-attr]
 
-            # Iterative refinement against the unregularized operator.
+            # Iterative refinement. When dual reg is active refine against the
+            # regularized operator; otherwise refine against the primal-only-reg operator.
             for _ in range(self.n_refine):
                 residual: np.ndarray = rhs - (LHS @ sol)
-                if m > 0:
-                    residual[:n] += delta * sol[:n]
-                else:
-                    residual += delta * sol
+                if not self._needs_dual_reg:
+                    if m > 0:
+                        residual[:n] += delta * sol[:n]
+                    else:
+                        residual += delta * sol
                 correction: np.ndarray = self._LHS_solver.solve(residual.flatten()).reshape(-1, 1)  # type:ignore[union-attr]
                 sol = sol + correction
 
@@ -198,16 +202,54 @@ class Solver:
         r3_aff: np.ndarray = -(prob.G @ state.x + state.s - prob.h)
         r4_aff: np.ndarray = -(prob.A @ state.x - prob.b)
 
-        dx_aff, ds_aff, dz_aff, dy_aff = solve_reduced(r1_aff, r2_aff, r3_aff, r4_aff)
+        # Factorize and compute affine direction. UMFPACK issues a Python warning
+        # (UMFPACKSingularMatrixWarning) when A is rank-deficient; escalate it to
+        # an exception so we can fall back to dual regularization on the (2,2) block.
+        def _factorize_and_solve_aff() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            # Record UMFPACK singularity warnings while we haven't yet confirmed dual
+            # reg is needed. Only treat them as errors when rcond < machine epsilon,
+            # which indicates true rank deficiency rather than mere ill-conditioning.
+            if not self._needs_dual_reg and m > 0:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", UMFPACKSingularMatrixWarning)
+                    factorize_lhs()
+                    dx, ds, dz, dy = solve_reduced(r1_aff, r2_aff, r3_aff, r4_aff)
+                for w in caught:
+                    if issubclass(w.category, UMFPACKSingularMatrixWarning):
+                        parts = str(w.message).split("rcond=")
+                        rcond = float(parts[1].rstrip(").")) if len(parts) > 1 else 0.0
+                        if rcond < np.finfo(float).eps:
+                            msg = f"Effectively singular KKT (rcond={rcond:.2e}); retrying with dual regularization."
+                            raise ValueError(msg)
+                return dx, ds, dz, dy
+            factorize_lhs()
+            return solve_reduced(r1_aff, r2_aff, r3_aff, r4_aff)
 
-        # Centering-corrector RHS
-        mu: float = (state.s.T @ state.z).item() / p
-        alpha: float = min(1, self.max_step(state.s, ds_aff), self.max_step(state.z, dz_aff))
-        sigma: float = (((state.s + alpha * ds_aff).T @ (state.z + alpha * dz_aff)) / (state.s.T @ state.z)).item() ** 3
+        try:
+            dx_aff, ds_aff, dz_aff, dy_aff = _factorize_and_solve_aff()
+        except Exception:
+            if not self._needs_dual_reg and m > 0:
+                self._needs_dual_reg = True
+                self._LHS_solver = None
+                LHS = build_lhs(dual_reg=True)
+                dx_aff, ds_aff, dz_aff, dy_aff = _factorize_and_solve_aff()
+            else:
+                raise
 
-        r2_cc: np.ndarray = sigma * mu - ds_aff * dz_aff
-
-        dx_cc, ds_cc, dz_cc, dy_cc = solve_reduced(np.zeros((n, 1)), r2_cc, np.zeros((p, 1)), np.zeros((m, 1)))
+        # Centering-corrector RHS (skipped when p=0: no complementarity to center)
+        if p > 0:
+            mu: float = (state.s.T @ state.z).item() / p
+            alpha: float = min(1, self.max_step(state.s, ds_aff), self.max_step(state.z, dz_aff))
+            sigma: float = (
+                ((state.s + alpha * ds_aff).T @ (state.z + alpha * dz_aff)) / (state.s.T @ state.z)
+            ).item() ** 3
+            r2_cc: np.ndarray = sigma * mu - ds_aff * dz_aff
+            dx_cc, ds_cc, dz_cc, dy_cc = solve_reduced(np.zeros((n, 1)), r2_cc, np.zeros((p, 1)), np.zeros((m, 1)))
+        else:
+            dx_cc = np.zeros((n, 1))
+            ds_cc = np.zeros((p, 1))
+            dz_cc = np.zeros((p, 1))
+            dy_cc = np.zeros((m, 1))
 
         # Combine aff and cc directions
         dx: np.ndarray = dx_aff + dx_cc
@@ -240,8 +282,9 @@ class Solver:
 
     def solve(self) -> tuple[Result, list[SolverState]]:
         """Solve problem from start to finish, returning state history."""
-        # Reset cached factorization so reusing a Solver (or mutating prob) is safe.
+        # Reset cached state so reusing a Solver is safe.
         self._LHS_solver = None
+        self._needs_dual_reg = False
 
         try:
             state_history: list[SolverState] = [self.find_initial_state()]
@@ -265,7 +308,7 @@ class Solver:
             if not self.quiet:
                 print(msg)
 
-            return (Result(False, msg, final_state), [])
+            return (Result(convergence=False, msg=msg, final_state=final_state), [])
 
         try:
             while state_history[-1].iter < self.max_iter:
