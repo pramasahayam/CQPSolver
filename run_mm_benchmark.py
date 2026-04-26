@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-import scipy.sparse as sp
-from scipy.io import loadmat
+import scipy.sparse as sp  # type:ignore[import-untyped]
+from scipy.io import loadmat  # type:ignore[import-untyped]
 
 from cqpsolver import Problem, Solver
 
@@ -152,7 +152,7 @@ def print_live_row(idx: int, total: int, row: dict[str, object]) -> None:
     obj = row["obj"]
 
     print(
-        f"{prefix}  {name:<14}  n={n:>5}  m={m:>5}  p={p:>6}  {status}  {iters:>4} iters  {t:>8.3f}s  obj= {obj:>14.6e}",
+        f"{prefix} {name:<14}  n={n:>5}  m={m:>5}  p={p:>6}  {status}  {iters:>4} iters  {t:>8.3f}s  obj= {obj:>14.6e}",
     )
     sys.stdout.flush()
 
@@ -185,7 +185,7 @@ def run_benchmark(
     solved = 0
     failed = 0
 
-    with open(output_csv, "w", newline="", encoding="utf-8") as csvfile:
+    with Path.open(output_csv, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=CSV_FIELDNAMES)
         writer.writeheader()
         csvfile.flush()
