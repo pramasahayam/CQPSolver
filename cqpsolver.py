@@ -85,6 +85,7 @@ class Solver:
     n_refine: int = 0  # Iterative refinement passes per Newton solve (0 disables).
     _LHS_solver: UMFFactor | None = field(default=None, init=False, repr=False)
     _needs_dual_reg: bool = field(default=False, init=False, repr=False)
+    _current_delta: float = field(default=0.0, init=False, repr=False)
 
     def find_initial_state(self) -> SolverState:
         """Calculate the initial point (x0, s0, y0, z0)."""
@@ -143,9 +144,8 @@ class Solver:
         prob: Problem = self.prob
         n, m, p = prob.n, prob.m, prob.p
         s, z = state.s, state.z  # (p, 1) column vectors
+        delta: float = self._current_delta
         zs: np.ndarray = z / s
-
-        delta: float = self.reg
 
         # Build reduced (n+m) x (n+m) system once per iteration
         GTzsG: sp.csc_array = prob.G.T @ sp.diags_array(zs.ravel()) @ prob.G
@@ -225,16 +225,27 @@ class Solver:
             factorize_lhs()
             return solve_reduced(r1_aff, r2_aff, r3_aff, r4_aff)
 
-        try:
-            dx_aff, ds_aff, dz_aff, dy_aff = _factorize_and_solve_aff()
-        except Exception:
-            if not self._needs_dual_reg and m > 0:
-                self._needs_dual_reg = True
-                self._LHS_solver = None
-                LHS = build_lhs(dual_reg=True)
+        # Factorize with cascading fallbacks:
+        #   1. dual regularization on (2,2) block (rank-deficient A)
+        #   2. increase primal delta 10x up to 1e-2 (z/s blow-up near active constraints)
+        _max_delta: float = 1e-2
+        while True:
+            try:
                 dx_aff, ds_aff, dz_aff, dy_aff = _factorize_and_solve_aff()
-            else:
-                raise
+                break
+            except Exception:
+                if not self._needs_dual_reg and m > 0:
+                    self._needs_dual_reg = True
+                    self._LHS_solver = None
+                    LHS = build_lhs(dual_reg=True)
+                elif delta * 10 <= _max_delta:
+                    delta *= 10
+                    self._current_delta = delta
+                    self._LHS_solver = None
+                    LHS_11 = prob.Q + GTzsG + delta * sp.eye(n)
+                    LHS = build_lhs(self._needs_dual_reg)
+                else:
+                    raise
 
         # Centering-corrector RHS (skipped when p=0: no complementarity to center)
         if p > 0:
@@ -285,6 +296,7 @@ class Solver:
         # Reset cached state so reusing a Solver is safe.
         self._LHS_solver = None
         self._needs_dual_reg = False
+        self._current_delta = self.reg
 
         try:
             state_history: list[SolverState] = [self.find_initial_state()]
