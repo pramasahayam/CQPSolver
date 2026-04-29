@@ -78,9 +78,39 @@ public:
 private:
     Problem prob_;
 
+    // Cached transposes — avoid recomputing G^T and A^T every iteration.
+    SpMat Gt_, At_;
+
+    // Pre-allocated KKT matrix with precomputed value-index maps for O(nnz) updates.
+    struct LhsCache {
+        SpMat mat;
+        bool  for_dual_reg = false;
+        bool  valid        = false;
+        std::vector<Eigen::Index> Q_offsets;     // offsets into mat.valuePtr() for each Q nnz
+        std::vector<Eigen::Index> GtDG_offsets;  // offsets for each GtDG nnz (from first-iter GtDG pattern)
+        std::vector<Eigen::Index> diag11_offsets; // offsets for the n diagonal entries of block (1,1)
+        std::vector<Eigen::Index> diag22_offsets; // offsets for the m diagonal entries of block (2,2)
+        std::vector<double>       Q_vals;         // fixed Q values (copied once)
+    };
+    LhsCache lhs_cache_;
+
     std::unique_ptr<UmfPackLUWithInfo> lhs_solver_;
     bool   needs_dual_reg_ = false;
     double current_delta_  = 0.0;
+
+    // Find the compressed-storage offset of (row, col) in a CSC matrix.
+    static Eigen::Index find_inner_offset(const SpMat& mat, int row, int col);
+
+    // Build lhs_cache_.mat with the correct sparsity for dual_reg setting,
+    // populate offset maps, and reset lhs_solver_.
+    // GtDG must be the actual G^T*D*G for this iteration — its structural
+    // non-zeros are used as the authoritative pattern (avoids bugs from
+    // GtG pruning integer-cancellation zeros that GtDG later fills in).
+    void init_lhs_cache(const SpMat& GtDG, bool dual_reg);
+
+    // Update lhs_cache_.mat values in-place given new GtDG and delta.
+    // Requires lhs_cache_.valid and lhs_cache_.for_dual_reg matching needs_dual_reg_.
+    void update_lhs_in_place(const SpMat& GtDG, double delta);
 
     SpMat   build_lhs(const SpMat& lhs_11, bool dual_reg) const;
     void    factorize_lhs(const SpMat& lhs);

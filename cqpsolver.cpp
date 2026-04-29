@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
@@ -49,7 +50,6 @@ static SpMat hstack(const SpMat& A, const SpMat& B) {
     return result;
 }
 
-// [[A, B], [C, D]]
 static SpMat block2x2(const SpMat& A, const SpMat& B,
                       const SpMat& C, const SpMat& D) {
     return vstack(hstack(A, B), hstack(C, D));
@@ -83,20 +83,121 @@ static const char* kHeader =
 Solver::Solver(Problem prob, double tol, int max_iter, bool quiet,
                double reg, int n_refine)
     : tol(tol), max_iter(max_iter), quiet(quiet), reg(reg), n_refine(n_refine),
-      prob_(std::move(prob)) {}
+      prob_(std::move(prob))
+{
+    Gt_ = prob_.G.transpose();
+    At_ = prob_.A.transpose();
+}
+
+// ─── find_inner_offset ───────────────────────────────────────────────────────
+
+Eigen::Index Solver::find_inner_offset(const SpMat& mat, int row, int col) {
+    using StorageIndex = SpMat::StorageIndex;
+    const StorageIndex* outer = mat.outerIndexPtr();
+    const StorageIndex* inner = mat.innerIndexPtr();
+    StorageIndex start = outer[col], end = outer[col + 1];
+    auto it = std::lower_bound(inner + start, inner + end, static_cast<StorageIndex>(row));
+    assert(it != inner + end && *it == row);
+    return it - inner;
+}
+
+// ─── init_lhs_cache ──────────────────────────────────────────────────────────
+
+void Solver::init_lhs_cache(const SpMat& GtDG, bool dual_reg) {
+    int n = prob_.n(), m = prob_.m();
+
+    // Build lhs using the actual GtDG pattern as the sparsity template.
+    // Using GtDG (not a precomputed GtG) avoids a subtle pruning bug: for
+    // integer-structured G (e.g. network incidence matrices), G^T*G can have
+    // exact zero entries (±1 cancellations) that get pruned by makeCompressed,
+    // while G^T*D*G has non-zero values at those same positions. GtDG always
+    // has the correct structural superset of all future GtDG iterates.
+    SpMat lhs_11 = prob_.Q + GtDG + speye(n, current_delta_);
+    SpMat lhs    = build_lhs(lhs_11, dual_reg);
+    lhs.makeCompressed();
+
+    lhs_cache_.mat          = std::move(lhs);
+    lhs_cache_.for_dual_reg = dual_reg;
+    lhs_cache_.valid        = true;
+
+    const SpMat& L = lhs_cache_.mat;
+
+    // Q offsets and values (fixed across iterations)
+    lhs_cache_.Q_offsets.clear();
+    lhs_cache_.Q_vals.clear();
+    for (int col = 0; col < n; ++col)
+        for (SpMat::InnerIterator it(prob_.Q, col); it; ++it) {
+            lhs_cache_.Q_offsets.push_back(find_inner_offset(L, it.row(), col));
+            lhs_cache_.Q_vals.push_back(it.value());
+        }
+
+    // GtDG offsets — uses the pattern of the supplied GtDG matrix.
+    // All future GtDG iterates have the same structural non-zeros (zs > 0 always).
+    lhs_cache_.GtDG_offsets.clear();
+    for (int col = 0; col < n; ++col)
+        for (SpMat::InnerIterator it(GtDG, col); it; ++it)
+            lhs_cache_.GtDG_offsets.push_back(find_inner_offset(L, it.row(), col));
+
+    // Diagonal (1,1) block offsets
+    lhs_cache_.diag11_offsets.resize(n);
+    for (int i = 0; i < n; ++i)
+        lhs_cache_.diag11_offsets[i] = find_inner_offset(L, i, i);
+
+    // Diagonal (2,2) block offsets (dual_reg only)
+    lhs_cache_.diag22_offsets.clear();
+    if (dual_reg && m > 0) {
+        lhs_cache_.diag22_offsets.resize(m);
+        for (int i = 0; i < m; ++i)
+            lhs_cache_.diag22_offsets[i] = find_inner_offset(L, n + i, n + i);
+    }
+
+    // Sparsity changed — must redo symbolic factorization.
+    lhs_solver_.reset();
+}
+
+// ─── update_lhs_in_place ─────────────────────────────────────────────────────
+
+void Solver::update_lhs_in_place(const SpMat& GtDG, double delta) {
+    double* vals = lhs_cache_.mat.valuePtr();
+
+    // Zero all variable positions (Q, GtDG, δI may overlap; zeroing twice is fine).
+    for (auto off : lhs_cache_.Q_offsets)      vals[off] = 0.0;
+    for (auto off : lhs_cache_.GtDG_offsets)   vals[off] = 0.0;
+    for (auto off : lhs_cache_.diag11_offsets) vals[off] = 0.0;
+    for (auto off : lhs_cache_.diag22_offsets) vals[off] = 0.0;
+
+    // Write Q (fixed values)
+    for (size_t k = 0; k < lhs_cache_.Q_offsets.size(); ++k)
+        vals[lhs_cache_.Q_offsets[k]] += lhs_cache_.Q_vals[k];
+
+    // Write GtDG (variable values, fixed pattern)
+    {
+        size_t k = 0;
+        for (int col = 0; col < GtDG.outerSize(); ++col)
+            for (SpMat::InnerIterator it(GtDG, col); it; ++it)
+                vals[lhs_cache_.GtDG_offsets[k++]] += it.value();
+    }
+
+    // Add δ on diag (1,1)
+    for (auto off : lhs_cache_.diag11_offsets)
+        vals[off] += delta;
+
+    // Add −δ on diag (2,2) for dual regularization
+    for (auto off : lhs_cache_.diag22_offsets)
+        vals[off] -= delta;
+}
 
 // ─── build_lhs ───────────────────────────────────────────────────────────────
 
 SpMat Solver::build_lhs(const SpMat& lhs_11, bool dual_reg) const {
     int m = prob_.m();
     if (m == 0) return lhs_11;
-    SpMat At = prob_.A.transpose();
     if (dual_reg) {
         SpMat D22 = speye(m, -current_delta_);
-        return block2x2(lhs_11, At, prob_.A, D22);
+        return block2x2(lhs_11, At_, prob_.A, D22);
     }
     SpMat zero_mm(m, m);
-    return block2x2(lhs_11, At, prob_.A, zero_mm);
+    return block2x2(lhs_11, At_, prob_.A, zero_mm);
 }
 
 // ─── factorize_lhs ───────────────────────────────────────────────────────────
@@ -109,24 +210,26 @@ void Solver::factorize_lhs(const SpMat& lhs) {
     } else {
         lhs_solver_->factorize(lhs);
     }
-    if (lhs_solver_->info() == Eigen::NumericalIssue && lhs_solver_->umfpackFactorizeReturncode() != UMFPACK_WARNING_singular_matrix) {
+    if (lhs_solver_->info() == Eigen::NumericalIssue &&
+        lhs_solver_->umfpackFactorizeReturncode() != UMFPACK_WARNING_singular_matrix) {
         throw std::runtime_error("UmfPackLU factorization failed.");
     }
 }
 
 // ─── solve_reduced_impl ──────────────────────────────────────────────────────
-// The Python version captures z, s, prob from enclosing scope. In C++ we pass them.
+
 static Solver::Direction solve_reduced_impl(
     const UmfPackLUWithInfo& solver,
     const SpMat& lhs,
     const SpMat& G,
+    const SpMat& Gt,  // cached G^T
     const Vec& z, const Vec& s,
     const Vec& r1, const Vec& r2, const Vec& r3, const Vec& r4,
     int n, int m,
     bool needs_dual_reg, double current_delta,
     int n_refine)
 {
-    Vec rhs_x = r1 - G.transpose() * ((r2 - z.cwiseProduct(r3)).cwiseQuotient(s));
+    Vec rhs_x = r1 - Gt * ((r2 - z.cwiseProduct(r3)).cwiseQuotient(s));
     Vec rhs = (m > 0) ? (Vec(n + m) << rhs_x, r4).finished() : rhs_x;
 
     Vec sol = solver.solve(rhs);
@@ -155,12 +258,11 @@ static Solver::Direction solve_reduced_impl(
 SolverState Solver::find_initial_state() {
     int n = prob_.n(), m = prob_.m(), p = prob_.p();
 
-    // Build (n+p+m) × (n+p+m) block system
     SpMat Q_reg = prob_.Q + speye(n, reg);
-    SpMat top   = hstack(hstack(Q_reg, prob_.G.transpose()), prob_.A.transpose());
+    SpMat top   = hstack(hstack(Q_reg, Gt_), At_);
 
     SpMat mid_left  = hstack(prob_.G, speye(p, -1.0));
-    SpMat mid_right(p, m);  // zero block
+    SpMat mid_right(p, m);
     SpMat mid = hstack(mid_left, mid_right);
 
     SpMat LHS;
@@ -214,44 +316,45 @@ SolverState Solver::step(const SolverState& state) {
     const Vec& z = state.z;
     double delta = current_delta_;
 
-    Vec zs = z.cwiseQuotient(s);
+    Vec zs    = z.cwiseQuotient(s);
+    SpMat GtDG = Gt_ * zs.asDiagonal() * prob_.G;
 
-    // Reduced (n+m) × (n+m) LHS
-    SpMat GTzsG = prob_.G.transpose() * zs.asDiagonal() * prob_.G;
-    SpMat lhs_11 = prob_.Q + GTzsG + speye(n, delta);
+    // Ensure the LHS cache is initialized for the current dual-reg setting.
+    if (!lhs_cache_.valid || lhs_cache_.for_dual_reg != needs_dual_reg_)
+        init_lhs_cache(GtDG, needs_dual_reg_);
+    update_lhs_in_place(GtDG, delta);
 
-    SpMat lhs = build_lhs(lhs_11, needs_dual_reg_);
-
-    // Affine RHS
-    Vec r1_aff = -(prob_.Q * state.x + prob_.q + prob_.G.transpose() * state.z + prob_.A.transpose() * state.y);
+    // Affine-scaling RHS
+    Vec r1_aff = -(prob_.Q * state.x + prob_.q + Gt_ * state.z + At_ * state.y);
     Vec r2_aff = -s.cwiseProduct(z);
     Vec r3_aff = -(prob_.G * state.x + s - prob_.h);
     Vec r4_aff = -(prob_.A * state.x - prob_.b);
 
-    // Factorize with cascading fallbacks
     constexpr double kMaxDelta = 1e-2;
+    const double kRcondTol = std::sqrt(std::numeric_limits<double>::epsilon());
     Direction aff;
 
     while (true) {
         bool singular_error = false;
         try {
-            factorize_lhs(lhs);
+            factorize_lhs(lhs_cache_.mat);
 
-            // Check for singular warning (only when dual reg not yet active)
             if (!needs_dual_reg_ && m > 0) {
                 int retcode = lhs_solver_->umfpackFactorizeReturncode();
                 if (retcode == UMFPACK_WARNING_singular_matrix) {
-                    double rcond = lhs_solver_->rcond();
-                    if (rcond < std::numeric_limits<double>::epsilon()) {
+                    if (lhs_solver_->rcond() < kRcondTol)
                         singular_error = true;
-                    }
                 }
             }
 
             if (!singular_error) {
-                aff = solve_reduced_impl(*lhs_solver_, lhs, prob_.G, z, s,
+                aff = solve_reduced_impl(*lhs_solver_, lhs_cache_.mat,
+                                        prob_.G, Gt_, z, s,
                                         r1_aff, r2_aff, r3_aff, r4_aff,
                                         n, m, needs_dual_reg_, current_delta_, n_refine);
+                if (!aff.dx.allFinite() || !aff.ds.allFinite() ||
+                    !aff.dz.allFinite() || !aff.dy.allFinite())
+                    throw std::runtime_error("Non-finite Newton direction.");
                 break;
             }
         } catch (...) {
@@ -260,14 +363,15 @@ SolverState Solver::step(const SolverState& state) {
 
         if (singular_error && !needs_dual_reg_ && m > 0) {
             needs_dual_reg_ = true;
-            lhs_solver_.reset();
-            lhs = build_lhs(lhs_11, true);
+            init_lhs_cache(GtDG, true);
+            update_lhs_in_place(GtDG, delta);
         } else if (delta * 10.0 <= kMaxDelta) {
-            delta *= 10.0;
-            current_delta_ = delta;
+            delta          *= 10.0;
+            current_delta_  = delta;
+            // Same sparsity — update values in-place, but reset solver
+            // so factorize() is called fresh on the next iteration.
             lhs_solver_.reset();
-            lhs_11 = prob_.Q + GTzsG + speye(n, delta);
-            lhs = build_lhs(lhs_11, needs_dual_reg_);
+            update_lhs_in_place(GtDG, delta);
         } else {
             throw std::runtime_error("KKT system singular, all fallbacks exhausted.");
         }
@@ -282,7 +386,8 @@ SolverState Solver::step(const SolverState& state) {
         Vec z_trial  = z + alpha * aff.dz;
         double sigma = std::pow(s_trial.dot(z_trial) / s.dot(z), 3.0);
         Vec r2_cc    = Vec::Constant(p, sigma * mu) - aff.ds.cwiseProduct(aff.dz);
-        cc = solve_reduced_impl(*lhs_solver_, lhs, prob_.G, z, s,
+        cc = solve_reduced_impl(*lhs_solver_, lhs_cache_.mat,
+                                prob_.G, Gt_, z, s,
                                 Vec::Zero(n), r2_cc, Vec::Zero(p), Vec::Zero(m),
                                 n, m, needs_dual_reg_, current_delta_, n_refine);
     } else {
@@ -301,8 +406,8 @@ SolverState Solver::step(const SolverState& state) {
     Vec z_new = z       + step_size * dz;
     Vec y_new = state.y + step_size * dy;
 
-    double obj     = 0.5 * x_new.dot(prob_.Q * x_new) + prob_.q.dot(x_new);
-    Residuals res  = calc_residuals(x_new, s_new, z_new, y_new);
+    double obj    = 0.5 * x_new.dot(prob_.Q * x_new) + prob_.q.dot(x_new);
+    Residuals res = calc_residuals(x_new, s_new, z_new, y_new);
     SolverState new_state{state.iter + 1, obj, x_new, s_new, z_new, y_new, res, step_size};
 
     if (!quiet) print_row(new_state);
@@ -313,8 +418,9 @@ SolverState Solver::step(const SolverState& state) {
 
 std::pair<Result, std::vector<SolverState>> Solver::solve() {
     lhs_solver_.reset();
-    needs_dual_reg_ = false;
-    current_delta_  = reg;
+    lhs_cache_.valid = false;
+    needs_dual_reg_  = false;
+    current_delta_   = reg;
 
     std::vector<SolverState> history;
 
@@ -371,12 +477,12 @@ std::pair<Result, std::vector<SolverState>> Solver::solve() {
 
 Residuals Solver::calc_residuals(const Vec& x, const Vec& s,
                                  const Vec& z, const Vec& y) const {
-    double primal_ineq   = (prob_.G * x + s - prob_.h).lpNorm<Eigen::Infinity>();
-    double primal_eq     = (prob_.A * x - prob_.b).lpNorm<Eigen::Infinity>();
-    double stationarity  = (prob_.Q * x + prob_.q
-                            + prob_.G.transpose() * z
-                            + prob_.A.transpose() * y).lpNorm<Eigen::Infinity>();
-    double duality       = std::abs(z.dot(s));
+    double primal_ineq  = (prob_.G * x + s - prob_.h).lpNorm<Eigen::Infinity>();
+    double primal_eq    = (prob_.A * x - prob_.b).lpNorm<Eigen::Infinity>();
+    double stationarity = (prob_.Q * x + prob_.q
+                           + Gt_ * z
+                           + At_ * y).lpNorm<Eigen::Infinity>();
+    double duality      = std::abs(z.dot(s));
     return {primal_ineq, primal_eq, stationarity, duality};
 }
 
@@ -406,8 +512,8 @@ bool Solver::converged(const SolverState& state) const {
 
     double scale_stat = 1.0 + std::max({
         (prob_.Q * state.x).lpNorm<Eigen::Infinity>(),
-        (prob_.A.transpose() * state.y).lpNorm<Eigen::Infinity>(),
-        (prob_.G.transpose() * state.z).lpNorm<Eigen::Infinity>(),
+        (At_ * state.y).lpNorm<Eigen::Infinity>(),
+        (Gt_ * state.z).lpNorm<Eigen::Infinity>(),
         prob_.q.lpNorm<Eigen::Infinity>(),
     });
     bool stat_check = res.stationarity < tol * scale_stat;
